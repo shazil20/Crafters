@@ -6,6 +6,7 @@ from .views import *
 router = DefaultRouter()
 router.register(r'products', ProductView)
 router.register(r'contact', ContactViewSet)
+router.register(r'favorites', FavoriteViewset, basename='favorites')
 
 
 urlpatterns = [
@@ -24,4 +25,11 @@ urlpatterns = [
     path('admin-checkout/', AdminCheckoutViewSet.as_view(), name= 'admin-checkout'),
     path('admin-checkout/<int:pk>/', AdminCheckoutViewSet.as_view(), name='admin-checkout-detail'),
     path('product/search/', search_products, name='search_products_api'),
+
+
+
+    path('password_reset/', CustomPasswordResetView.as_view(), name='password_reset'),
+    path('password_reset/done/', CustomPasswordResetDoneView.as_view(), name='password_reset_done'),
+    path('password_reset/<uidb64>/<token>/', CustomPasswordResetConfirmView.as_view(), name='password_reset_confirm'),
+    path('password_reset/complete/', CustomPasswordResetCompleteView.as_view(), name='password_reset_complete'),
 ]

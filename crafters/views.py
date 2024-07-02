@@ -1,5 +1,20 @@
 from rest_framework import viewsets, generics, status
 from rest_framework.decorators import api_view, permission_classes
+from django.contrib.sites.shortcuts import get_current_site
+from django.template.loader import render_to_string
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from jwt.utils import force_bytes
+from django.contrib.auth.models import User
+from django.contrib.auth.models import User
+from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.forms import SetPasswordForm
+from django.shortcuts import get_object_or_404, render, redirect
+from django.utils.http import urlsafe_base64_decode
+from django.utils.encoding import force_str
+from django.shortcuts import render, redirect
+from django.core.mail import send_mail, EmailMessage
+from django.contrib.auth.forms import SetPasswordForm
+from django.contrib.auth.tokens import default_token_generator
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -65,28 +80,14 @@ class UserLoginAPIView(APIView):
 
 
 class UserRegisterAPIView(APIView):
+    permission_classes = [AllowAny]
+
     def post(self, request):
-        if request.method == 'POST':
-            data = request.data
-            username = data.get('username')
-            password = data.get('password')
-            profile_photo = data.get('profile_photo')
-            email = data.get('email')
-            role = data.get('role', 'user')
-
-            # Create user
-            user = CustomUser.objects.create_user(username=username, password=password,
-                                                  profile_photo=profile_photo, email=email)
-
-            # Assign role
-            user.role = role
-
-            # Save user
-            user.save()
-
-            return JsonResponse({'message': 'User created successfully.'})
-        else:
-            return JsonResponse({'error': 'Method not allowed.'}, status=405)
+        serializer = CustomUserSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'message': 'User created successfully.'}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class UserLogoutAPIView(APIView):
@@ -124,20 +125,20 @@ class CheckoutView(APIView):
         user = request.user
 
         # Retrieve the cart items associated with the logged-in user
-        order = Order.objects.filter(user=user)
+        orders = Order.objects.filter(user=user)
 
         # Serialize the cart items data
         order_data = []
-        for item in order:
+        for order in orders:
             image_url = request.build_absolute_uri(
-                item.product.product_picture.url) if item.product.product_picture else None
+                order.product.product_picture.url) if order.product.product_picture else None
             order_data.append({
-                'product_id': item.product.id,
-                'product_name': item.product.name,
-                'price': item.price,
-                'quantity': item.quantity,
+                'product_id': order.product.id,
+                'product_name': order.product.name,
+                'price': order.price,
+                'quantity': order.quantity,
                 'image_url': image_url,
-                'status': item.status
+                'status': order.status,
             })
 
         return JsonResponse({'order_items': order_data})
@@ -160,7 +161,6 @@ class CheckoutView(APIView):
         cart_items.delete()
 
         return Response({'message': 'Orders placed successfully'}, status=status.HTTP_201_CREATED)
-
 
 class UserCartView(APIView):
     permission_classes = [AllowAny]
@@ -202,6 +202,7 @@ class AddToCartView(APIView):
         product = get_object_or_404(Product, id=product_id)
         price = request.data.get('price')
         quantity = request.data.get('quantity')
+        date =request.data.get('date')
 
         # Ensure price and quantity are valid integers
         try:
@@ -284,6 +285,7 @@ class AdminCheckoutViewSet(APIView):
                 'order_id': order.id,
                 'user_id': order.user.id,
                 'user_email': order.user.email,
+                'user_name': order.user.username,
                 'product_id': order.product.id,
                 'product_name': order.product.name,
                 'price': order.price,
@@ -345,3 +347,130 @@ def search_products(request):
             product_data['image_url'] = image_url
 
     return Response(serializer.data)
+
+
+
+
+
+
+from .forms import CustomPasswordResetForm
+from django.contrib.auth import get_user_model
+from django.views.generic import View
+from django.shortcuts import render
+
+
+
+
+
+UserModel = get_user_model()
+
+class CustomPasswordResetView(View):
+    template_name = 'password_reset_form.html'  # Replace with your template path
+
+    def get(self, request):
+        form = CustomPasswordResetForm()
+        return render(request, self.template_name, {'form': form})
+
+    def post(self, request):
+        form = CustomPasswordResetForm(request.POST)
+        if form.is_valid():
+            email = form.cleaned_data['email']
+            user = UserModel.objects.filter(email=email).first()
+            if user:
+                current_site = get_current_site(request)
+                subject = render_to_string('password_reset_subject.txt', {
+                    'site_name': current_site.name,
+                })
+                email_template = render_to_string('password_reset_email.html', {
+                    'user': user,
+                    'protocol': request.scheme,
+                    'domain': current_site.domain,
+                    'uidb64': urlsafe_base64_encode(force_bytes(str(user.pk))),
+                    'token': default_token_generator.make_token(user),
+                    'password_reset_timeout': user.get_password_reset_timeout(),
+                })
+                email = EmailMessage(
+                    subject=f"Reset Your Password on {current_site.name}",
+                    body=email_template,
+                    from_email=None,  # Set your email address for sending
+                    to=[email],
+                )
+
+                email.send()
+            return render(request, 'password_reset_done.html')  # Replace with your template path
+        return render(request, self.template_name, {'form': form})
+
+
+class CustomPasswordResetConfirmView(View):
+    template_name = 'password_reset_confirm.html'  # Replace with your template path
+
+    def get(self, request, uidb64, token):
+        try:
+            uid = urlsafe_base64_decode(uidb64).decode()
+            user = UserModel.objects.get(pk=uid)
+        except (TypeError, ValueError, UserModel.DoesNotExist):
+            user = None
+
+        if user is not None and default_token_generator.check_token(user, token):
+            form = SetPasswordForm(user=user)  # Pass the user object to the form
+            return render(request, self.template_name, {'form': form})
+        return redirect('password_reset_done')  # Replace with your password reset done URL
+
+    def post(self, request, uidb64, token):
+        try:
+            uid = urlsafe_base64_decode(uidb64).decode()
+            user = UserModel.objects.get(pk=uid)
+        except (TypeError, ValueError, UserModel.DoesNotExist):
+            user = None
+
+        if user is not None and default_token_generator.check_token(user, token):
+            form = SetPasswordForm(user, request.POST)  # Pass both user and request.POST
+            if form.is_valid():
+                form.save()
+                return redirect('password_reset_complete')
+        else:
+            form = SetPasswordForm(user)  # Pass user to initialize the form properly
+
+        return render(request, self.template_name, {'form': form})
+
+
+class CustomPasswordResetDoneView(View):
+    template_name = 'password_reset_done.html'  # Replace with your template path
+
+    def get(self, request):
+        return render(request, self.template_name)
+
+
+class CustomPasswordResetCompleteView(View):
+    template_name = 'password_reset_complete.html'  # Replace with your template path
+
+    def get(self, request):
+        return render(request, self.template_name)
+
+
+
+
+class FavoriteViewset(viewsets.ModelViewSet):
+    permission_classes = [AllowAny]
+    serializer_class = FavoritesSerializer
+    queryset = Favorites.objects.all()
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_authenticated:
+            return Favorites.objects.filter(user=user)
+        return Favorites.objects.none()
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.delete()
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+            self.perform_destroy(instance)
+            return Response({"detail": "Favorite deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
+        except Favorites.DoesNotExist:
+            return Response({"detail": "Favorite not found."}, status=status.HTTP_404_NOT_FOUND)
